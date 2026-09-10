@@ -13,7 +13,7 @@ async def test_null_adapter_is_honest():
     resp = await adapter.generate(ModelRequest(prompt="hello"))
     assert resp.status == ModelStatus.MODEL_UNAVAILABLE
     assert resp.text is None  # no fabricated answer
-    assert "not connected" in (resp.error or "")
+    assert resp.error  # explains why
 
 
 async def test_courier_submit_creates_task_and_reports_unavailable(session):
@@ -21,7 +21,7 @@ async def test_courier_submit_creates_task_and_reports_unavailable(session):
     result = await CourierService(session).submit(caller, "please do X")
     assert result.status == TaskStatus.CREATED
     assert result.model_status == ModelStatus.MODEL_UNAVAILABLE
-    assert "not connected" in result.detail
+    assert "no model provider" in result.detail.lower()
 
 
 async def test_courier_endpoint_reports_model_unavailable(client, auth_headers):

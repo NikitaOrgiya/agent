@@ -1,8 +1,21 @@
+x-model-env: &model-env
+  MODEL_PROVIDER: ${MODEL_PROVIDER:-none}
+  MODEL_NAME: ${MODEL_NAME:-}
+  MODEL_BASE_URL: ${MODEL_BASE_URL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  DEFAULT_MODEL_PROFILE: ${DEFAULT_MODEL_PROFILE:-standard}
+  MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-60}
+  MAX_MODEL_CALLS_PER_TASK: ${MAX_MODEL_CALLS_PER_TASK:-2}
+  CONTEXT_MAX_MESSAGES: ${CONTEXT_MAX_MESSAGES:-12}
+  CONTEXT_MAX_CHARS: ${CONTEXT_MAX_CHARS:-12000}
+
 services:
   kernel:
     build: .
     restart: unless-stopped
     environment:
+      <<: *model-env
       AGENTOS_ENV: ${AGENTOS_ENV:-dev}
       AGENTOS_CONTROL_TOKEN: ${AGENTOS_CONTROL_TOKEN:?set AGENTOS_CONTROL_TOKEN in .env}
       DATABASE_URL: postgresql+asyncpg://agentos:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agentos
@@ -20,6 +33,25 @@ services:
       interval: 10s
       timeout: 3s
       retries: 10
+
+  telegram-gateway:
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "app.telegram.runner"]
+    # Long polling only: no inbound port published.
+    environment:
+      <<: *model-env
+      AGENTOS_ENV: ${AGENTOS_ENV:-dev}
+      DATABASE_URL: postgresql+asyncpg://agentos:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agentos
+      REDIS_URL: redis://redis:6379/0
+      OWNER_TELEGRAM_IDS: ${OWNER_TELEGRAM_IDS:-}
+      COURIER_TELEGRAM_BOT_TOKEN: ${COURIER_TELEGRAM_BOT_TOKEN:-}
+      INTELLIGENCE_TELEGRAM_BOT_TOKEN: ${INTELLIGENCE_TELEGRAM_BOT_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kernel:
+        condition: service_started
 
   postgres:
     image: postgres:16-alpine

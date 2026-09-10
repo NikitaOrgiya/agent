@@ -63,6 +63,8 @@ class CapabilityRequest(BaseModel):
     # empty / "*" / malformed resources (deny by default).
     resource: str = Field(default="", max_length=500)
     risk_level: RiskLevel = RiskLevel.L1
+    # ADVISORY ONLY. A client cannot grant authority with this flag. Verified
+    # approval is carried out-of-band in PolicyContext by the trusted layer.
     owner_approved: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 

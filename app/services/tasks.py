@@ -4,10 +4,10 @@ Minimal, model-free. Enforces valid state transitions; an invalid transition is
 rejected with ``InvalidTransition``.
 
     created -> clarifying | planned | running | waiting_approval | cancelled | failed
-    clarifying -> planned | cancelled | failed
-    planned -> running | waiting_approval | cancelled | failed
+    clarifying -> running | planned | cancelled | failed
+    planned -> running | clarifying | waiting_approval | cancelled | failed
     waiting_approval -> running | planned | cancelled | failed
-    running -> waiting_approval | completed | failed | cancelled
+    running -> clarifying | waiting_approval | completed | failed | cancelled
     completed / failed / cancelled -> (terminal)
 """
 
@@ -32,11 +32,17 @@ _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
         }
     ),
     TaskStatus.CLARIFYING: frozenset(
-        {TaskStatus.PLANNED, TaskStatus.CANCELLED, TaskStatus.FAILED}
+        {
+            TaskStatus.RUNNING,
+            TaskStatus.PLANNED,
+            TaskStatus.CANCELLED,
+            TaskStatus.FAILED,
+        }
     ),
     TaskStatus.PLANNED: frozenset(
         {
             TaskStatus.RUNNING,
+            TaskStatus.CLARIFYING,
             TaskStatus.WAITING_APPROVAL,
             TaskStatus.CANCELLED,
             TaskStatus.FAILED,
@@ -52,6 +58,7 @@ _TRANSITIONS: dict[TaskStatus, frozenset[TaskStatus]] = {
     ),
     TaskStatus.RUNNING: frozenset(
         {
+            TaskStatus.CLARIFYING,
             TaskStatus.WAITING_APPROVAL,
             TaskStatus.COMPLETED,
             TaskStatus.FAILED,
@@ -113,6 +120,7 @@ class TaskService:
         result_summary: str | None = None,
         error: str | None = None,
         assigned_role: AgentRole | None = None,
+        pending_question: str | None = None,
     ) -> Task:
         if new_status not in _TRANSITIONS.get(task.status, frozenset()):
             raise InvalidTransition(task.status, new_status)
@@ -124,6 +132,10 @@ class TaskService:
             task.result_summary = result_summary
         if error is not None:
             task.error = error
+        # pending_question is set when moving into clarifying, cleared otherwise.
+        task.pending_question = (
+            pending_question if new_status == TaskStatus.CLARIFYING else None
+        )
         if new_status in _TERMINAL:
             task.completed_at = utcnow()
         await self.session.flush()

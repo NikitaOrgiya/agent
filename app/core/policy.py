@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import dataclass
 
 from app.core.enums import AgentRole, PolicyDecision, RiskLevel
 from app.core.registry import get_action_spec
@@ -21,6 +22,24 @@ _RISK_ORDER: dict[RiskLevel, int] = {
 }
 
 
+@dataclass(frozen=True)
+class PolicyContext:
+    """Trusted, server-side facts about a request.
+
+    Only the trusted application layer constructs this. A public
+    ``CapabilityRequest`` cannot set ``verified_owner_approval`` -- a client that
+    sends ``owner_approved: true`` in JSON does NOT get a verified approval and
+    does NOT gain authority. Real cryptographic approval arrives with Custodian;
+    this is the correct trust boundary in the meantime.
+    """
+
+    verified_owner_approval: bool = False
+    approval_source: str | None = None  # e.g. "custodian", "cli", "test"
+
+
+_EMPTY_CONTEXT = PolicyContext()
+
+
 class PolicyEngine:
     """Deterministic, deny-by-default trust-boundary rules.
 
@@ -32,13 +51,13 @@ class PolicyEngine:
     2. raw secret-material boundary  -- above the registry, always
     3. Capability Registry lookup (unknown action / wrong role -> DENY)
     4. risk floor (registry min_risk, plus a prefix safety net)
-    5. approval gate (effective L3 / L4 -> REQUIRE_APPROVAL unless owner approved)
+    5. approval gate (effective L3 / L4 -> REQUIRE_APPROVAL unless
+       PolicyContext.verified_owner_approval)
     6. ALLOW
 
     Any unexpected error during evaluation results in DENY (fail closed).
     """
 
-    # --- hard isolation prefixes (independent of the registry) --------------
     _secret_prefixes = ("secret.", "vault.")
     _money_prefixes = ("wallet.", "payment.", "payments.")
     _root_prefixes = (
@@ -58,9 +77,12 @@ class PolicyEngine:
         "vault.read_raw",
     )
 
-    def check(self, req: CapabilityRequest) -> PolicyResult:
+    def check(
+        self, req: CapabilityRequest, context: PolicyContext | None = None
+    ) -> PolicyResult:
+        ctx = context or _EMPTY_CONTEXT
         try:
-            result = self._check(req)
+            result = self._check(req, ctx)
         except Exception:
             logger.exception("policy evaluation error; denying request")
             return self._deny(
@@ -75,14 +97,15 @@ class PolicyEngine:
                 "resource": getattr(req, "resource", "?"),
                 "decision": result.decision,
                 "matched_rule": result.matched_rule,
+                "verified_owner_approval": ctx.verified_owner_approval,
             },
         )
         return result
 
-    def _check(self, req: CapabilityRequest) -> PolicyResult:
+    def _check(self, req: CapabilityRequest, ctx: PolicyContext) -> PolicyResult:
         raw_action = req.action if isinstance(req.action, str) else ""
 
-        # --- 0. input validation -------------------------------------------
+        # --- 0. input validation -----------------------------------------
         if (
             not raw_action
             or raw_action != raw_action.strip()
@@ -97,14 +120,21 @@ class PolicyEngine:
         except InvalidResourceId as exc:
             return self._deny(f"Invalid resource id: {exc}", "MALFORMED_RESOURCE")
 
-        # Defense in depth: fold case before every boundary comparison.
         action = raw_action.casefold()
         if req.actor not in frozenset(AgentRole):
             return self._deny("Unknown actor role.", "UNKNOWN_ACTOR")
         if req.risk_level not in _RISK_ORDER:
             return self._deny("Unknown or malformed risk level.", "MALFORMED_RISK_LEVEL")
 
-        # --- 1. LAB hard isolation ---------------------------------------
+        # A client-supplied owner_approved flag is advisory only. Note it if it
+        # disagrees with the verified context, then ignore it.
+        if getattr(req, "owner_approved", False) and not ctx.verified_owner_approval:
+            logger.warning(
+                "ignoring client-supplied owner_approved=true (not verified) for action %r",
+                action,
+            )
+
+        # --- 1. LAB hard isolation -------------------------------------
         if req.actor == AgentRole.LAB:
             forbidden = self._starts_with_any(
                 action,
@@ -117,7 +147,7 @@ class PolicyEngine:
                     "LAB_HARD_ISOLATION",
                 )
 
-        # --- 2. raw secret-material boundary ---------------------------
+        # --- 2. raw secret-material boundary -----------------------
         if action in self._raw_secret_actions or action.startswith("secret.read_raw"):
             if req.actor == AgentRole.COURIER:
                 return self._deny(
@@ -131,7 +161,7 @@ class PolicyEngine:
                     "SECRET_MATERIAL_CUSTODIAN_ONLY",
                 )
 
-        # --- 3. Capability Registry -----------------------------------
+        # --- 3. Capability Registry ---------------------------------
         spec = get_action_spec(action)
         if spec is None:
             return self._deny(
@@ -144,18 +174,18 @@ class PolicyEngine:
                 "ROLE_NOT_PERMITTED",
             )
 
-        # --- 4. risk floor ------------------------------------------
+        # --- 4. risk floor -----------------------------------------
         effective_risk = self._effective_risk(action, spec.min_risk, req.risk_level)
 
-        # --- 5. approval gate --------------------------------------
-        if _RISK_ORDER[effective_risk] >= _RISK_ORDER[RiskLevel.L4] and not req.owner_approved:
+        # --- 5. approval gate -------------------------------------
+        if _RISK_ORDER[effective_risk] >= _RISK_ORDER[RiskLevel.L4] and not ctx.verified_owner_approval:
             return self._approval(
-                "L4 actions always require explicit owner approval.",
+                "L4 actions always require verified owner approval.",
                 "L4_OWNER_APPROVAL",
             )
-        if _RISK_ORDER[effective_risk] == _RISK_ORDER[RiskLevel.L3] and not req.owner_approved:
+        if _RISK_ORDER[effective_risk] == _RISK_ORDER[RiskLevel.L3] and not ctx.verified_owner_approval:
             return self._approval(
-                "L3 actions require explicit owner or delegated approval.",
+                "L3 actions require verified owner or delegated approval.",
                 "L3_APPROVAL",
             )
 
@@ -165,7 +195,7 @@ class PolicyEngine:
             matched_rule="REGISTRY_ALLOW",
         )
 
-    # --- helpers ------------------------------------------------------
+    # --- helpers ---------------------------------------------------
     @staticmethod
     def _starts_with_any(value: str, prefixes: tuple[str, ...]) -> bool:
         return any(value.startswith(prefix) for prefix in prefixes)

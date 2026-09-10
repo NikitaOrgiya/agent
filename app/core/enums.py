@@ -64,6 +64,18 @@ class ModelStatus(StrEnum):
     MODEL_ERROR = "model_error"
 
 
+class ModelResponseKind(StrEnum):
+    """Whether a model turn is a usable answer or a request for more input."""
+
+    ANSWER = "answer"
+    NEEDS_CLARIFICATION = "needs_clarification"
+
+
+class ConversationKind(StrEnum):
+    COURIER = "courier"
+    INTELLIGENCE = "intelligence"
+
+
 class AuditOutcome(StrEnum):
     """What happened as a result of an audited attempt."""
 

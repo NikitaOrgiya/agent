@@ -3,10 +3,11 @@
 import pytest
 
 from app.core.enums import AgentRole, PolicyDecision, RiskLevel
-from app.core.policy import PolicyEngine
+from app.core.policy import PolicyContext, PolicyEngine
 from app.core.schemas import CapabilityRequest
 
 engine = PolicyEngine()
+VERIFIED = PolicyContext(verified_owner_approval=True, approval_source="test")
 
 
 def _req(**kw) -> CapabilityRequest:
@@ -113,16 +114,34 @@ def test_allowed_action_still_allowed():
 
 # corrected invariant: Custodian is NOT a universal executor
 def test_custodian_cannot_execute_production_delete():
-    r = engine.check(_req(actor=AgentRole.CUSTODIAN, action="production.delete",
-                          resource="service:prod-db", risk_level=RiskLevel.L4, owner_approved=True))
+    r = engine.check(
+        _req(actor=AgentRole.CUSTODIAN, action="production.delete",
+             resource="service:prod-db", risk_level=RiskLevel.L4),
+        VERIFIED,
+    )
     assert r.decision == PolicyDecision.DENY
     assert r.matched_rule == "ROLE_NOT_PERMITTED"
 
 
-def test_engineer_executes_production_delete_with_owner_approval():
-    r = engine.check(_req(actor=AgentRole.ENGINEER, action="production.delete",
-                          resource="service:prod-db", risk_level=RiskLevel.L4, owner_approved=True))
+def test_engineer_executes_production_delete_with_verified_approval():
+    r = engine.check(
+        _req(actor=AgentRole.ENGINEER, action="production.delete",
+             resource="service:prod-db", risk_level=RiskLevel.L4),
+        VERIFIED,
+    )
     assert r.decision == PolicyDecision.ALLOW
+
+
+# Sprint 2: a client-supplied owner_approved flag is NOT verified approval.
+def test_client_owner_approved_flag_cannot_grant_authority():
+    spoof = _req(actor=AgentRole.ENGINEER, action="production.delete",
+                 resource="service:prod-db", risk_level=RiskLevel.L4, owner_approved=True)
+    # no PolicyContext -> unverified
+    r = engine.check(spoof)
+    assert r.decision == PolicyDecision.REQUIRE_APPROVAL
+    assert r.matched_rule == "L4_OWNER_APPROVAL"
+    # same request, verified context -> allowed
+    assert engine.check(spoof, VERIFIED).decision == PolicyDecision.ALLOW
 
 
 def test_engineer_production_delete_without_approval_blocked():

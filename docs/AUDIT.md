@@ -7,11 +7,17 @@ stdout are kept as well, but the database is authoritative.
 
 | Event | actor | action | resource | task_id | decision | outcome |
 |---|---|---|---|---|---|---|
-| Task created (via Courier) | requested role | `task.create` | `task:<id>` | yes | – | `success` |
-| Policy check | requested role | the requested action | requested `ResourceId` | if supplied | `allow` / `deny` / `require_approval` | mapped outcome |
+| Task created (Courier) | `courier` / role | `task.create` | `task:<id>` | yes | – | `success` |
+| Policy check | requested role | the requested action | requested `ResourceId` | if supplied | `allow` / `deny` / `require_approval` | mapped |
+| Model call (Courier) | `courier` | `model.call` | `task:<id>` | yes | – | `success` / `error` |
+| Model call (Intelligence) | `lab` | `model.call` | `intelligence:telegram:<id>` | – | – | `success` / `error` |
+| Model unavailable | `courier` | `model.unavailable` | `task:<id>` | yes | – | `error` |
 
 Every record carries `created_at`, a free-text `reason`, and a small `extra`
-JSON blob (`matched_rule`, `caller`, …).
+JSON blob. For model calls `extra` holds `provider`, `model`, `profile`,
+`prompt_version`, `latency_ms`, `input_tokens`, `output_tokens` — **never the
+prompt text or chain-of-thought**. Detailed per-call cost/latency/token metrics
+also go to the dedicated `model_calls` table (basis for a future Cost Brain).
 
 ## Never stored
 

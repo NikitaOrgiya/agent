@@ -10,6 +10,7 @@ from app.core.enums import (
     AgentRole,
     AuditOutcome,
     BudgetTier,
+    ConversationKind,
     ExecutionMode,
     RiskLevel,
     TaskStatus,
@@ -29,6 +30,7 @@ _EXEC_MODE = Enum(ExecutionMode, name="execution_mode")
 _BUDGET = Enum(BudgetTier, name="budget_tier")
 _TRUTH = Enum(TruthStatus, name="truth_status")
 _OUTCOME = Enum(AuditOutcome, name="audit_outcome")
+_CONV_KIND = Enum(ConversationKind, name="conversation_kind")
 
 
 class Base(DeclarativeBase):
@@ -55,6 +57,8 @@ class Task(Base):
 
     raw_input: Mapped[str] = mapped_column(Text)
     normalized_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # When status == clarifying: the outstanding question put to the owner.
+    pending_question: Mapped[str | None] = mapped_column(Text, nullable=True)
     execution_mode: Mapped[ExecutionMode] = mapped_column(
         _EXEC_MODE, default=ExecutionMode.PREVIEW
     )
@@ -113,3 +117,51 @@ class AuditEvent(Base):
     outcome: Mapped[AuditOutcome | None] = mapped_column(_OUTCOME, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     extra: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelCall(Base):
+    """One model invocation. Basis for a future Model Arena / Cost Brain.
+
+    Never stores the full prompt or any chain-of-thought -- only metadata.
+    """
+
+    __tablename__ = "model_calls"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    task_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    provider: Mapped[str] = mapped_column(String(60))
+    model: Mapped[str] = mapped_column(String(120))
+    profile: Mapped[str] = mapped_column(String(30))
+    purpose: Mapped[str] = mapped_column(String(60), default="general")
+    prompt_version: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    status: Mapped[str] = mapped_column(String(30))
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Conversation(Base):
+    """Minimal per-owner conversation state (one row per owner_key + kind).
+
+    ``turns`` is a bounded JSON list of {"role","content"}. No long-term memory.
+    """
+
+    __tablename__ = "conversations"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    owner_key: Mapped[str] = mapped_column(String(120), index=True)
+    kind: Mapped[ConversationKind] = mapped_column(_CONV_KIND)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    active_task_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("tasks.id"), nullable=True
+    )
+    model_profile: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    turns: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import Principal, authorize_actor, require_principal
 from app.core.enums import PolicyDecision
-from app.core.policy import PolicyEngine
+from app.core.policy import PolicyContext, PolicyEngine
 from app.core.schemas import CapabilityRequest, PolicyResult
 from app.infra.db import get_session
 from app.services.audit import AuditService, outcome_for_decision
@@ -25,8 +25,13 @@ async def check_policy(
 ) -> PolicyResult:
     authorize_actor(principal, payload.actor)
 
+    # The public API has no way to *verify* owner approval (that arrives with
+    # Custodian). A client-sent `owner_approved: true` is therefore ignored:
+    # the context always carries verified_owner_approval=False here.
+    context = PolicyContext(verified_owner_approval=False)
+
     try:
-        result = engine.check(payload)
+        result = engine.check(payload, context)
     except Exception:
         logger.exception("policy endpoint error; denying request")
         result = PolicyResult(
@@ -35,8 +40,6 @@ async def check_policy(
             matched_rule="EVALUATION_ERROR",
         )
 
-    # Persist the decision. Audit is on the critical path here: if it cannot be
-    # recorded, the caller must not receive the decision (which could be ALLOW).
     try:
         await AuditService(session).record(
             actor=str(payload.actor),

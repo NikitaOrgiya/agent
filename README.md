@@ -15,56 +15,63 @@ The V0 goal is deliberately narrow: establish a trustworthy control plane before
 7. **Learning is gated** — traces may produce improvement proposals, but production changes require evaluation and approval.
 8. **Audit everything important** — privileged decisions and actions must be attributable and reviewable.
 
-## What exists now (after Sprint 1)
+## What exists now (after Sprint 2)
 
-- FastAPI control-plane service, loopback-only by default
-- PostgreSQL schema managed by **Alembic migrations** (not by app startup)
-- deterministic **deny-by-default** policy engine backed by a central
-  **Capability Registry**
+- FastAPI control-plane service (`kernel`), loopback-only, Alembic-managed schema
+- deterministic **deny-by-default** policy engine + central **Capability
+  Registry**; owner approval is a **server-side `PolicyContext`**, never a
+  client JSON flag
 - canonical **ResourceId** contract (logical ids, never OS paths)
-- **Control Plane token auth** on `/v1/*`; requested role is separate from the
-  authenticated caller
-- **persistent audit trail** (`audit_events`) with a fail-closed policy
-- task lifecycle with enforced state transitions
-- **Courier** domain foundation (no Telegram, no LLM) + provider-neutral
-  **ModelAdapter** interface with an honest `MODEL_UNAVAILABLE` null adapter
-- `/health` (liveness) and `/readiness` (database check)
-- architecture, trust model, threat model, policy, audit and current-state docs
+- **Control Plane token auth** on `/v1/*`; **persistent audit trail** with a
+  fail-closed policy
+- **Telegram gateway** (`telegram-gateway`, long polling, no inbound port):
+  - **Courier bot** — task in → model → evidence/audit → answer
+  - **Intelligence Zone bot** — direct owner ↔ model chat, separate token
+- numeric **owner allowlist**, deny by default
+- **Model Router** + `OpenAI` / `OpenAI-compatible` / `Anthropic` adapters
+  (plain httpx, no SDK), honest `MODEL_UNAVAILABLE` fallback
+- **clarification** foundation, bounded **conversation context**, versioned
+  **system contracts**, **cost controls** (`MAX_MODEL_CALLS_PER_TASK`)
+- `model_calls` metadata table (provider/model/profile/latency/tokens) for a
+  future Cost Brain
 
-See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) for the full picture.
+See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) and
+[docs/MODEL_LAYER.md](docs/MODEL_LAYER.md).
 
 ## Deliberately not present yet
 
-Telegram execution · LLM provider integration · device / browser control ·
-secrets broker / Custodian · autonomous execution · self-evolution ·
-resource-scoped ACLs · signed capability grants.
+Device / browser / shell / payment execution · secrets broker / Custodian ·
+verified cryptographic approval · web research · long-term memory ·
+self-evolution · Model Arena.
 
 ## Quick start (Docker)
 
 ```bash
-cp .env.example .env      # set AGENTOS_CONTROL_TOKEN and POSTGRES_PASSWORD
+cp .env.example .env
+# set AGENTOS_CONTROL_TOKEN, POSTGRES_PASSWORD, OWNER_TELEGRAM_IDS,
+# a bot token, and (optionally) MODEL_PROVIDER + MODEL_NAME + an API key
 docker compose up --build
 ```
 
-API is exposed on `http://127.0.0.1:8080` only.
+`kernel` API on `127.0.0.1:8080` only; `telegram-gateway` polls Telegram.
 
 ## Quick start (local venv)
 
 ```bash
 python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"     # Windows: .venv\Scripts\python
-cp .env.example .env                             # set AGENTOS_CONTROL_TOKEN
+cp .env.example .env
 .venv/bin/python -m alembic upgrade head          # requires PostgreSQL
-.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8080   # API
+.venv/bin/python -m app.telegram.runner                                 # bots
 ```
 
-Endpoints: `GET /health`, `GET /readiness`, `POST /v1/tasks`,
-`GET /v1/tasks/{id}`, `POST /v1/policy/check` (the `/v1/*` routes need
-`Authorization: Bearer <AGENTOS_CONTROL_TOKEN>`). Interactive docs at `/docs`.
-
-Tests: `pytest -q` (in-memory SQLite; PostgreSQL remains the only production DB).
+`/v1/*` needs `Authorization: Bearer <AGENTOS_CONTROL_TOKEN>`. Interactive docs
+at `/docs`. Tests: `pytest -q` (in-memory SQLite; PostgreSQL is the only
+production backend).
 
 ## Next milestone
 
-Telegram Courier interface + one low-cost model provider behind the existing
-adapter interface. Still no raw secret access and no destructive device authority.
+Web research / tools (evidence upgraded to `SUPPORTED`/`OBSERVED`), verified
+approval via Custodian, long-term memory. Still no raw secret access and no
+destructive device authority.

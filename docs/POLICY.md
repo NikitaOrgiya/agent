@@ -5,9 +5,25 @@ override it. It is **deny by default**.
 
 ## Inputs
 
-`CapabilityRequest`: `actor` (requested role, not proven identity), `action`
-(canonical dotted identifier), `resource` (canonical `ResourceId`, see
-`app/core/resource.py`), `risk_level` (caller-declared), `owner_approved`.
+`PolicyEngine.check(request, context)`:
+
+- **`CapabilityRequest`** (public, may originate from a client): `actor`
+  (requested role, not proven identity), `action`, `resource` (canonical
+  `ResourceId`), `risk_level` (caller-declared), `owner_approved`
+  (**advisory only — never grants authority**).
+- **`PolicyContext`** (server-side, trusted-layer only): `verified_owner_approval`,
+  `approval_source`. A client cannot construct this. It defaults to
+  `verified_owner_approval=False`.
+
+### Requested vs. verified owner approval
+
+A client sending `owner_approved: true` in JSON does **not** get a verified
+approval. The approval gate (step 5) consults **only**
+`PolicyContext.verified_owner_approval`. The public `/v1/policy/check` endpoint
+always passes an unverified context, so L3/L4 via the API is always
+`REQUIRE_APPROVAL`. Internal/trusted flows (and tests) may pass a verified
+context. Cryptographic approval arrives with Custodian; this is the correct
+trust boundary until then.
 
 ## Evaluation order
 
@@ -32,9 +48,9 @@ override it. It is **deny by default**.
 4. **Risk floor.** Effective risk = `max(declared, spec.min_risk,
    prefix_safety_net(action))`. A caller cannot under-declare a sensitive
    action.
-5. **Approval gate.** Effective L4 → `REQUIRE_APPROVAL` unless `owner_approved`
-   (`L4_OWNER_APPROVAL`). Effective L3 → `REQUIRE_APPROVAL` unless
-   `owner_approved` (`L3_APPROVAL`).
+5. **Approval gate.** Effective L4 → `REQUIRE_APPROVAL` unless
+   `context.verified_owner_approval` (`L4_OWNER_APPROVAL`). Effective L3 →
+   `REQUIRE_APPROVAL` unless `context.verified_owner_approval` (`L3_APPROVAL`).
 6. Otherwise → `ALLOW` (`REGISTRY_ALLOW`).
 
 Any exception during evaluation → `DENY` `EVALUATION_ERROR`. The API endpoint

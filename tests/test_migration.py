@@ -10,10 +10,18 @@ from pathlib import Path
 from app.core import enums
 from app.infra.models import Base
 
-_path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "0001_initial.py"
-_spec = importlib.util.spec_from_file_location("_migration_0001", _path)
-migration = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(migration)
+_VERSIONS = Path(__file__).resolve().parents[1] / "alembic" / "versions"
+
+
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(f"_mig_{name}", _VERSIONS / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+migration = _load("0001_initial")
+migration2 = _load("0002_sprint2")
 
 
 def test_all_orm_tables_are_in_metadata():
@@ -22,6 +30,8 @@ def test_all_orm_tables_are_in_metadata():
         "capability_grants",
         "evidence",
         "audit_events",
+        "model_calls",
+        "conversations",
     }
 
 
@@ -36,6 +46,8 @@ def test_enum_values_match_python_enums():
     assert set(m["audit_outcome"]) == {e.value for e in enums.AuditOutcome}
 
 
-def test_migration_has_single_head():
+def test_migration_chain():
     assert migration.revision == "0001_initial"
     assert migration.down_revision is None
+    assert migration2.revision == "0002_sprint2"
+    assert migration2.down_revision == "0001_initial"

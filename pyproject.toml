@@ -16,19 +16,28 @@ dependencies = [
   "asyncpg>=0.29",
   "alembic>=1.13",
   "redis>=5.0",
+  "httpx>=0.27",
+  "aiogram>=3.13,<4",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.24",
-  "httpx>=0.27",
   "aiosqlite>=0.20",   # test-only async DB driver; PostgreSQL is the only production backend
   "ruff>=0.7",
 ]
 
 [tool.setuptools]
-packages = ["app", "app.api", "app.core", "app.infra", "app.services"]
+packages = [
+  "app",
+  "app.adapters",
+  "app.api",
+  "app.core",
+  "app.infra",
+  "app.services",
+  "app.telegram",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

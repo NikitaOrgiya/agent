@@ -1,71 +1,73 @@
-# Current State — after Sprint 1
+# Current State — after Sprint 2
 
-## What Agent OS can do now
+## Works
 
-- **Run locally** as a FastAPI control plane (Python venv or Docker Compose).
-- **Managed schema.** PostgreSQL schema is created and versioned by Alembic
-  (`alembic upgrade head`). The application process never alters the schema.
-- **Authenticated control plane.** `/v1/*` requires a bearer Control Plane token
-  (`AGENTOS_CONTROL_TOKEN`, env only). `/health` and `/readiness` are open.
-- **Identity vs. requested role.** The token authenticates one caller
-  (`control-plane`). The `actor` / `requested_actor` field in a request is only
-  a *request* to act as a role; the caller cannot become `owner` or `custodian`
-  through JSON — those roles are not requestable via the Sprint 1 token.
-- **Deterministic policy engine**, deny-by-default, backed by a central
-  **Capability Registry** (`app/core/registry.py`) — one source of truth for
-  action → allowed roles / minimum risk. See [POLICY.md](POLICY.md).
-- **Canonical ResourceId** contract (`type:value`, e.g. `project:agent-os`,
-  `secretref:openai/main`). No `*` full-access. OS paths are never capability
-  resources. See `app/core/resource.py`.
-- **Persistent audit trail** in `audit_events` for task creation and every
-  policy decision, with a documented fail-closed policy. See [AUDIT.md](AUDIT.md).
-- **Task lifecycle** with enforced state transitions
-  (`created → … → completed/failed/cancelled`); invalid transitions are rejected.
-- **Courier foundation** (no Telegram, no LLM): accepts an authenticated
-  request, creates a task, records it, and honestly reports that execution
-  intelligence is not connected.
-- **Provider-neutral Model Adapter interface** with a `NullModelAdapter` that
-  returns `MODEL_UNAVAILABLE` instead of fabricating an answer.
-- **/health** (liveness) and **/readiness** (checks the database; no secrets,
-  DSNs, or stack traces in responses).
+- **Two Telegram interfaces** (long polling, no inbound port, no webhook):
+  - **Courier bot** — owner sends a task in plain language → authenticate →
+    `Task` → `ModelRouter` → model → evidence + audit + model-call metadata →
+    task completes → reply. `/start`, `/help`, `/status` are deterministic
+    (never call a model).
+  - **Intelligence Zone bot** — direct owner ↔ model conversation, *not* routed
+    through the Courier planner. `/models`, `/model [<profile>]`, `/new`.
+- **Owner identity** — numeric `OWNER_TELEGRAM_IDS` allowlist, deny by default;
+  a bot token with an empty allowlist refuses to start. Unknown users get a bare
+  "Access denied". Audit reference is `telegram:<user_id>` only.
+- **Owner-approval trust boundary fixed** — `PolicyEngine.check` takes a
+  server-side `PolicyContext`; a client-sent `owner_approved: true` is advisory
+  only and never grants authority. L3/L4 via the public API is always
+  `REQUIRE_APPROVAL`.
+- **Model Router + provider adapters** — profiles `economy|standard|strong|
+  critical`; `NullModelAdapter` fallback (honest `MODEL_UNAVAILABLE`);
+  `OpenAICompatibleAdapter` and `AnthropicAdapter` (plain httpx, no SDK).
+  Provider is turned on by config only; API keys are env-only and never logged.
+- **Clarification foundation** — a model reply can be `ANSWER` or
+  `NEEDS_CLARIFICATION`; the task moves to `clarifying` and the next owner
+  message continues the same task (per-owner conversation binding).
+- **Task lifecycle with a model** — `created → running → completed`, or
+  `→ clarifying → running → completed`, or `→ failed` (clean message, no stack
+  trace to Telegram). Invalid transitions rejected.
+- **Evidence + model-call metadata** — a completed answer records an
+  `INFERRED` `Evidence` row (`source_type=model`), and every model call records
+  provider / model / profile / prompt_version / latency / tokens to the
+  `model_calls` table and the audit trail. No prompt text, no chain-of-thought.
+- **Cost controls** — `DEFAULT_MODEL_PROFILE`, `MAX_MODEL_CALLS_PER_TASK`
+  (default 2, enforced), one model call per normal message, one careful retry on
+  transient errors only.
+- **Bounded context** — recent turns replayed within `CONTEXT_MAX_MESSAGES` /
+  `CONTEXT_MAX_CHARS`. No long-term memory.
+- **Versioned system contracts** for Courier and Intelligence; the version is
+  stored in model-call metadata.
+- Alembic migration `0002` (`model_calls`, `conversations`,
+  `tasks.pending_question`). Everything from Sprint 1 still holds.
 
-## What it deliberately does NOT do yet
+## Does NOT work yet
 
-- No Telegram Courier, no LLM/model provider (OpenAI / Anthropic / local).
-- No Custodian, Agent Vault, secret broker, device or browser control.
-- No real multi-identity auth, no signed / expiring capability grants issued
-  from an `ALLOW`, no resource-scoped ACLs.
-- No task *execution* — a submitted task is recorded and then waits; nothing
-  processes it.
-- Redis is provisioned by Compose but not yet used by application code.
-- No audit read API, no tamper-evidence on the audit log.
+- Real device control, shell/production actions, payments.
+- Secrets broker / Custodian / Agent Vault; verified (cryptographic) approval.
+- Browser execution, web research (a plain answer is `INFERRED`, never
+  `OBSERVED`).
+- Long-term / semantic memory; multi-user conversations.
+- Self-evolution, Model Arena, multi-model debate.
+- Redis is still provisioned but unused by application code.
 
-## Wired next (Sprint 2, on architect approval)
+## Wired next (Sprint 3, on architect approval)
 
-- Telegram Courier interface + owner identity verification.
-- One low-cost LLM provider behind the existing `ModelAdapter` interface,
-  selected by a minimal Model Router; Courier core unchanged.
-- Task processing path: Courier → ModelAdapter → task transitions + evidence.
+Web research / tools that upgrade evidence to `SUPPORTED`/`OBSERVED`; verified
+approval via Custodian; long-term memory.
 
-## Run it
+## Run
 
-Local (venv):
-
-```
-python -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev]"      # Windows
-# .venv/bin/python -m pip install -e ".[dev]"        # Linux/macOS
-copy .env.example .env    # then set AGENTOS_CONTROL_TOKEN
-.venv\Scripts\python -m alembic upgrade head          # needs PostgreSQL
-.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
-```
-
-Docker:
-
-```
-cp .env.example .env      # set AGENTOS_CONTROL_TOKEN and POSTGRES_PASSWORD
-docker compose up --build # API on http://127.0.0.1:8080 only
+```bash
+cp .env.example .env
+# set: AGENTOS_CONTROL_TOKEN, POSTGRES_PASSWORD, OWNER_TELEGRAM_IDS,
+#      COURIER_TELEGRAM_BOT_TOKEN and/or INTELLIGENCE_TELEGRAM_BOT_TOKEN,
+#      MODEL_PROVIDER (+ MODEL_NAME + the matching API key) to connect a model
+docker compose up --build
 ```
 
-Tests: `.venv\Scripts\python -m pytest -q` (uses in-memory SQLite; PostgreSQL is
-the only production backend).
+`kernel` serves the API on `127.0.0.1:8080` only; `telegram-gateway` runs the
+bots (long polling, no port). Without `MODEL_PROVIDER` the bots still run and
+answer honestly that no model is connected.
+
+Local: `python -m app.telegram.runner` after `alembic upgrade head`.
+Tests: `pytest -q` (in-memory SQLite; PostgreSQL is the only production backend).
