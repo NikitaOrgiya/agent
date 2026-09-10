@@ -14,13 +14,12 @@ class AgentRole(StrEnum):
 
 
 class TaskStatus(StrEnum):
-    RECEIVED = "received"
-    CLARIFICATION_REQUIRED = "clarification_required"
+    CREATED = "created"
+    CLARIFYING = "clarifying"
     PLANNED = "planned"
     WAITING_APPROVAL = "waiting_approval"
     RUNNING = "running"
-    VERIFYING = "verifying"
-    SUCCEEDED = "succeeded"
+    COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
 
@@ -57,3 +56,18 @@ class TruthStatus(StrEnum):
     INFERRED = "inferred"
     UNCERTAIN = "uncertain"
     UNKNOWN = "unknown"
+
+
+class ModelStatus(StrEnum):
+    OK = "ok"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    MODEL_ERROR = "model_error"
+
+
+class AuditOutcome(StrEnum):
+    """What happened as a result of an audited attempt."""
+
+    SUCCESS = "success"
+    DENIED = "denied"
+    APPROVAL_REQUIRED = "approval_required"
+    ERROR = "error"

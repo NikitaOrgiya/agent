@@ -15,48 +15,56 @@ The V0 goal is deliberately narrow: establish a trustworthy control plane before
 7. **Learning is gated** — traces may produce improvement proposals, but production changes require evaluation and approval.
 8. **Audit everything important** — privileged decisions and actions must be attributable and reviewable.
 
-## V0 provides
+## What exists now (after Sprint 1)
 
-- FastAPI control-plane service
-- PostgreSQL-backed task, capability, evidence and audit models
-- deterministic policy engine
-- risk / approval model
-- Docker Compose foundation with PostgreSQL and Redis
-- architecture, trust model, threat model, and V1 roadmap
-- tests for critical trust-boundary rules
+- FastAPI control-plane service, loopback-only by default
+- PostgreSQL schema managed by **Alembic migrations** (not by app startup)
+- deterministic **deny-by-default** policy engine backed by a central
+  **Capability Registry**
+- canonical **ResourceId** contract (logical ids, never OS paths)
+- **Control Plane token auth** on `/v1/*`; requested role is separate from the
+  authenticated caller
+- **persistent audit trail** (`audit_events`) with a fail-closed policy
+- task lifecycle with enforced state transitions
+- **Courier** domain foundation (no Telegram, no LLM) + provider-neutral
+  **ModelAdapter** interface with an honest `MODEL_UNAVAILABLE` null adapter
+- `/health` (liveness) and `/readiness` (database check)
+- architecture, trust model, threat model, policy, audit and current-state docs
 
-## V0 deliberately does not provide yet
+See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) for the full picture.
 
-- Telegram execution
-- LLM provider integration
-- device control
-- secrets broker / Custodian
-- browser automation
-- autonomous code execution
-- self-evolution
+## Deliberately not present yet
 
-Those layers are added only after the trust model exists and is tested.
+Telegram execution · LLM provider integration · device / browser control ·
+secrets broker / Custodian · autonomous execution · self-evolution ·
+resource-scoped ACLs · signed capability grants.
 
-## Quick start
-
-Copy `.env.example` to `.env`, then run:
+## Quick start (Docker)
 
 ```bash
+cp .env.example .env      # set AGENTOS_CONTROL_TOKEN and POSTGRES_PASSWORD
 docker compose up --build
 ```
 
-Health endpoint:
+API is exposed on `http://127.0.0.1:8080` only.
 
-```text
-GET http://localhost:8080/health
+## Quick start (local venv)
+
+```bash
+python -m venv .venv
+.venv/bin/python -m pip install -e ".[dev]"     # Windows: .venv\Scripts\python
+cp .env.example .env                             # set AGENTOS_CONTROL_TOKEN
+.venv/bin/python -m alembic upgrade head          # requires PostgreSQL
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8080
 ```
 
-API docs:
+Endpoints: `GET /health`, `GET /readiness`, `POST /v1/tasks`,
+`GET /v1/tasks/{id}`, `POST /v1/policy/check` (the `/v1/*` routes need
+`Authorization: Bearer <AGENTOS_CONTROL_TOKEN>`). Interactive docs at `/docs`.
 
-```text
-http://localhost:8080/docs
-```
+Tests: `pytest -q` (in-memory SQLite; PostgreSQL remains the only production DB).
 
 ## Next milestone
 
-V0.1 adds the Telegram Courier interface and a provider-neutral model adapter. It should still have no raw secret access and no destructive device authority.
+Telegram Courier interface + one low-cost model provider behind the existing
+adapter interface. Still no raw secret access and no destructive device authority.

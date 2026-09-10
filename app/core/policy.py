@@ -2,15 +2,15 @@ import logging
 import re
 
 from app.core.enums import AgentRole, PolicyDecision, RiskLevel
+from app.core.registry import get_action_spec
+from app.core.resource import InvalidResourceId, parse_resource_id
 from app.core.schemas import CapabilityRequest, PolicyResult
 
 logger = logging.getLogger("agentos.policy")
 
-# Canonical identifiers are lowercase dotted paths, e.g. "secret.read_raw",
-# "web.read_public". Anything else is treated as malformed and denied.
+# Canonical action identifiers are trimmed lowercase dotted paths.
 # \A ... \Z (not ^ ... $) so a trailing newline cannot satisfy the anchor.
 _ACTION_RE = re.compile(r"\A[a-z][a-z0-9]*(?:\.[a-z0-9][a-z0-9_]*)+\Z")
-_RESOURCE_RE = re.compile(r"\A[a-z0-9][a-z0-9_.:/@-]{0,499}\Z")
 
 _RISK_ORDER: dict[RiskLevel, int] = {
     RiskLevel.L0: 0,
@@ -25,12 +25,20 @@ class PolicyEngine:
     """Deterministic, deny-by-default trust-boundary rules.
 
     A model can recommend an action, but it can never override this layer.
-    Every path that is not an explicit, well-formed, allow-listed request within
-    its risk budget results in DENY or REQUIRE_APPROVAL. Any unexpected error
-    during evaluation also results in DENY (fail closed).
+    Ordering:
+
+    0. input validation (malformed / non-canonical -> DENY)
+    1. LAB hard isolation  -- above the registry, always
+    2. raw secret-material boundary  -- above the registry, always
+    3. Capability Registry lookup (unknown action / wrong role -> DENY)
+    4. risk floor (registry min_risk, plus a prefix safety net)
+    5. approval gate (effective L3 / L4 -> REQUIRE_APPROVAL unless owner approved)
+    6. ALLOW
+
+    Any unexpected error during evaluation results in DENY (fail closed).
     """
 
-    # --- hard isolation prefixes ---------------------------------------------
+    # --- hard isolation prefixes (independent of the registry) --------------
     _secret_prefixes = ("secret.", "vault.")
     _money_prefixes = ("wallet.", "payment.", "payments.")
     _root_prefixes = (
@@ -42,8 +50,6 @@ class PolicyEngine:
     )
     _destructive_suffixes = (".delete", ".destroy", ".wipe", ".drop", ".purge")
 
-    # Actions that would expose raw secret material. Never available to a model
-    # role; Custodian only, and even then brokering is preferred.
     _raw_secret_actions = (
         "secret.read_raw",
         "secret.reveal",
@@ -52,99 +58,10 @@ class PolicyEngine:
         "vault.read_raw",
     )
 
-    # --- explicit allowlist -------------------------------------------------
-    # (action or "prefix.") -> roles permitted to request it. Anything not
-    # covered here is denied by default. Risk / approval gates still apply on
-    # top of a match. This is the V0 seed vocabulary; it is expected to grow
-    # through explicit, reviewed additions only.
-    _allow_rules: tuple[tuple[str, frozenset[AgentRole]], ...] = (
-        ("policy.check", frozenset(AgentRole)),
-        ("health.read", frozenset(AgentRole)),
-        (
-            "task.read",
-            frozenset(
-                {AgentRole.OWNER, AgentRole.COURIER, AgentRole.GUARDIAN, AgentRole.LAB}
-            ),
-        ),
-        ("task.create", frozenset({AgentRole.OWNER, AgentRole.COURIER})),
-        (
-            "reasoning.local",
-            frozenset(
-                {
-                    AgentRole.LAB,
-                    AgentRole.RESEARCHER,
-                    AgentRole.ENGINEER,
-                    AgentRole.VERIFIER,
-                    AgentRole.COURIER,
-                    AgentRole.GUARDIAN,
-                }
-            ),
-        ),
-        (
-            "web.read_public",
-            frozenset(
-                {
-                    AgentRole.LAB,
-                    AgentRole.RESEARCHER,
-                    AgentRole.BROWSER,
-                    AgentRole.COURIER,
-                }
-            ),
-        ),
-        (
-            "evidence.read",
-            frozenset(
-                {
-                    AgentRole.OWNER,
-                    AgentRole.COURIER,
-                    AgentRole.GUARDIAN,
-                    AgentRole.VERIFIER,
-                    AgentRole.LAB,
-                }
-            ),
-        ),
-        (
-            "evidence.write",
-            frozenset(
-                {
-                    AgentRole.COURIER,
-                    AgentRole.RESEARCHER,
-                    AgentRole.VERIFIER,
-                    AgentRole.GUARDIAN,
-                }
-            ),
-        ),
-        # Reference-based secret use (SecretRef identifiers, never raw material).
-        (
-            "secret.use_ref",
-            frozenset(
-                {
-                    AgentRole.COURIER,
-                    AgentRole.CUSTODIAN,
-                    AgentRole.ENGINEER,
-                    AgentRole.BROWSER,
-                }
-            ),
-        ),
-        # Raw secret material / vault operations: Custodian only.
-        ("secret.read_raw", frozenset({AgentRole.CUSTODIAN})),
-        ("vault.", frozenset({AgentRole.CUSTODIAN})),
-        # Money movement: Custodian or Owner, always with approval (risk floor L4).
-        ("wallet.", frozenset({AgentRole.CUSTODIAN, AgentRole.OWNER})),
-        ("payment.", frozenset({AgentRole.CUSTODIAN, AgentRole.OWNER})),
-        ("payments.", frozenset({AgentRole.CUSTODIAN, AgentRole.OWNER})),
-        # Destructive production / device actions: explicit owner approval only.
-        (
-            "production.delete",
-            frozenset({AgentRole.CUSTODIAN, AgentRole.OWNER, AgentRole.ENGINEER}),
-        ),
-        ("device.", frozenset({AgentRole.CUSTODIAN, AgentRole.OWNER})),
-    )
-
     def check(self, req: CapabilityRequest) -> PolicyResult:
         try:
             result = self._check(req)
-        except Exception:  # noqa: BLE001 - fail closed on any evaluation error
+        except Exception:
             logger.exception("policy evaluation error; denying request")
             return self._deny(
                 "Policy evaluation failed; denying by default.", "EVALUATION_ERROR"
@@ -164,11 +81,8 @@ class PolicyEngine:
 
     def _check(self, req: CapabilityRequest) -> PolicyResult:
         raw_action = req.action if isinstance(req.action, str) else ""
-        raw_resource = req.resource if isinstance(req.resource, str) else ""
 
-        # --- 0. Input validation: malformed / non-canonical request => DENY --
-        # Canonical identifiers are already-trimmed lowercase dotted paths. We do
-        # not "repair" a non-canonical identifier into an allowed one; we deny it.
+        # --- 0. input validation -------------------------------------------
         if (
             not raw_action
             or raw_action != raw_action.strip()
@@ -178,26 +92,19 @@ class PolicyEngine:
                 "Malformed, empty, or non-canonical action identifier.",
                 "MALFORMED_ACTION",
             )
-        if (
-            not raw_resource
-            or raw_resource != raw_resource.strip()
-            or raw_resource == "*"
-            or ".." in raw_resource
-            or not _RESOURCE_RE.match(raw_resource)
-        ):
-            return self._deny(
-                "Malformed, empty, wildcard, or unspecified resource identifier.",
-                "MALFORMED_RESOURCE",
-            )
+        try:
+            parse_resource_id(req.resource)
+        except InvalidResourceId as exc:
+            return self._deny(f"Invalid resource id: {exc}", "MALFORMED_RESOURCE")
 
-        # Defense in depth: fold case before every boundary comparison so a
-        # would-be "SECRET.read_raw" can never miss an isolation prefix even if
-        # the canonical-form check above is ever loosened.
+        # Defense in depth: fold case before every boundary comparison.
         action = raw_action.casefold()
         if req.actor not in frozenset(AgentRole):
             return self._deny("Unknown actor role.", "UNKNOWN_ACTOR")
+        if req.risk_level not in _RISK_ORDER:
+            return self._deny("Unknown or malformed risk level.", "MALFORMED_RISK_LEVEL")
 
-        # --- 1. Hard isolation: enforced before any allow logic --------------
+        # --- 1. LAB hard isolation ---------------------------------------
         if req.actor == AgentRole.LAB:
             forbidden = self._starts_with_any(
                 action,
@@ -210,6 +117,7 @@ class PolicyEngine:
                     "LAB_HARD_ISOLATION",
                 )
 
+        # --- 2. raw secret-material boundary ---------------------------
         if action in self._raw_secret_actions or action.startswith("secret.read_raw"):
             if req.actor == AgentRole.COURIER:
                 return self._deny(
@@ -223,24 +131,23 @@ class PolicyEngine:
                     "SECRET_MATERIAL_CUSTODIAN_ONLY",
                 )
 
-        # --- 2. Explicit allowlist: absence of a rule => DENY ---------------
-        allowed_roles = self._match_allow_rule(action)
-        if allowed_roles is None:
+        # --- 3. Capability Registry -----------------------------------
+        spec = get_action_spec(action)
+        if spec is None:
             return self._deny(
-                "No allow rule matches this action; denied by default.",
-                "NO_MATCHING_ALLOW_RULE",
+                "Action is not in the capability registry; denied by default.",
+                "UNKNOWN_ACTION",
             )
-        if req.actor not in allowed_roles:
+        if req.actor not in spec.allowed_roles:
             return self._deny(
-                f"Role '{req.actor}' is not permitted to request this action.",
+                f"Role '{req.actor}' is not permitted to request '{action}'.",
                 "ROLE_NOT_PERMITTED",
             )
 
-        # --- 3. Risk floor: caller cannot under-declare a sensitive action --
-        if req.risk_level not in _RISK_ORDER:
-            return self._deny("Unknown or malformed risk level.", "MALFORMED_RISK_LEVEL")
-        effective_risk = self._effective_risk(action, req.risk_level)
+        # --- 4. risk floor ------------------------------------------
+        effective_risk = self._effective_risk(action, spec.min_risk, req.risk_level)
 
+        # --- 5. approval gate --------------------------------------
         if _RISK_ORDER[effective_risk] >= _RISK_ORDER[RiskLevel.L4] and not req.owner_approved:
             return self._approval(
                 "L4 actions always require explicit owner approval.",
@@ -254,33 +161,31 @@ class PolicyEngine:
 
         return PolicyResult(
             decision=PolicyDecision.ALLOW,
-            reason="Matched an explicit allow rule within its risk budget.",
-            matched_rule="EXPLICIT_ALLOW",
+            reason="Matched a registered capability within its risk budget.",
+            matched_rule="REGISTRY_ALLOW",
         )
 
-    # --- helpers -----------------------------------------------------------
+    # --- helpers ------------------------------------------------------
     @staticmethod
     def _starts_with_any(value: str, prefixes: tuple[str, ...]) -> bool:
         return any(value.startswith(prefix) for prefix in prefixes)
 
-    def _match_allow_rule(self, action: str) -> frozenset[AgentRole] | None:
-        matched: frozenset[AgentRole] | None = None
-        for key, roles in self._allow_rules:
-            if action == key or (key.endswith(".") and action.startswith(key)):
-                matched = roles if matched is None else (matched | roles)
-        return matched
-
-    def _effective_risk(self, action: str, declared: RiskLevel) -> RiskLevel:
-        floor = RiskLevel.L1
+    def _prefix_risk_floor(self, action: str) -> RiskLevel:
         if self._starts_with_any(
             action, self._secret_prefixes + self._money_prefixes + self._root_prefixes
         ) or action.endswith(self._destructive_suffixes):
-            floor = RiskLevel.L4
-        elif action.startswith(("production.", "device.")):
-            floor = RiskLevel.L3
-        if _RISK_ORDER[declared] >= _RISK_ORDER[floor]:
-            return declared
-        return floor
+            return RiskLevel.L4
+        if action.startswith(("production.", "device.")):
+            return RiskLevel.L3
+        return RiskLevel.L0
+
+    def _effective_risk(
+        self, action: str, registry_min: RiskLevel, declared: RiskLevel
+    ) -> RiskLevel:
+        floor_value = max(
+            _RISK_ORDER[registry_min], _RISK_ORDER[self._prefix_risk_floor(action)]
+        )
+        return declared if _RISK_ORDER[declared] >= floor_value else _by_value(floor_value)
 
     @staticmethod
     def _deny(reason: str, rule: str) -> PolicyResult:
@@ -293,3 +198,10 @@ class PolicyEngine:
             reason=reason,
             matched_rule=rule,
         )
+
+
+_RISK_BY_VALUE: dict[int, RiskLevel] = {v: k for k, v in _RISK_ORDER.items()}
+
+
+def _by_value(value: int) -> RiskLevel:
+    return _RISK_BY_VALUE[value]

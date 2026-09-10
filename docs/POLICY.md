@@ -1,42 +1,62 @@
-# Policy Engine — V0 Contract
+# Policy Engine — Contract
 
 `app/core/policy.py` is the deterministic trust boundary. No LLM output can
 override it. It is **deny by default**.
 
+## Inputs
+
+`CapabilityRequest`: `actor` (requested role, not proven identity), `action`
+(canonical dotted identifier), `resource` (canonical `ResourceId`, see
+`app/core/resource.py`), `risk_level` (caller-declared), `owner_approved`.
+
 ## Evaluation order
 
-1. **Input validation.** `action` must be a canonical lowercase dotted identifier
-   (`^[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9_]*)+$`, already trimmed). `resource` must
-   be a concrete, non-wildcard, non-`..` identifier. Anything else → `DENY`
-   (`MALFORMED_ACTION` / `MALFORMED_RESOURCE`). Non-string or unknown actor →
-   `DENY`. Identifiers are **not** repaired into allowed forms.
-2. **Hard isolation** (cannot be granted by any allow rule or owner approval):
-   - `LAB` requesting `secret.*`, `vault.*`, `wallet.*`, `payment(s).*`,
-     `device.root`, `shell.*`, destructive `production.*`, or any `*.delete /
-     .destroy / .wipe / .drop / .purge` → `DENY` (`LAB_HARD_ISOLATION`).
-   - `secret.read_raw*` / `secret.reveal` / `secret.export` / `vault.export` /
-     `vault.read_raw` by `COURIER` → `DENY` (`COURIER_NO_RAW_SECRETS`); by any
-     role other than `CUSTODIAN` → `DENY` (`SECRET_MATERIAL_CUSTODIAN_ONLY`).
-3. **Explicit allowlist.** `_allow_rules` maps an action (or `prefix.`) to the
-   set of roles permitted to request it. No match → `DENY`
-   (`NO_MATCHING_ALLOW_RULE`). Match but wrong role → `DENY`
-   (`ROLE_NOT_PERMITTED`).
-4. **Risk floor.** The engine raises the caller-declared `risk_level` to a
-   minimum derived from the action (secrets / money / root / destructive → L4;
-   other `production.*` / `device.*` → L3). A caller cannot under-declare risk.
-5. **Approval gate.** Effective L4 → `REQUIRE_APPROVAL` unless `owner_approved`.
-   Effective L3 → `REQUIRE_APPROVAL` unless `owner_approved`.
-6. Otherwise → `ALLOW` (`EXPLICIT_ALLOW`).
+0. **Input validation.** `action` must match
+   `\A[a-z][a-z0-9]*(\.[a-z0-9][a-z0-9_]*)+\Z` and already be trimmed.
+   `resource` must be a valid canonical `ResourceId` (`type:value`, no `*`, no
+   `..`). Unknown actor / unknown risk level → `DENY`. Identifiers are **not**
+   repaired into allowed forms.
+   → `MALFORMED_ACTION` / `MALFORMED_RESOURCE` / `UNKNOWN_ACTOR` /
+   `MALFORMED_RISK_LEVEL`
+1. **LAB hard isolation** — above the registry, always. `LAB` requesting
+   `secret.*` / `vault.*` / `wallet.*` / `payment(s).*` / `device.root` /
+   `shell.*` / destructive `production.*` / any `*.delete|.destroy|.wipe|.drop
+   |.purge` → `DENY` `LAB_HARD_ISOLATION`.
+2. **Raw secret-material boundary** — above the registry, always.
+   `secret.read_raw*` / `secret.reveal` / `secret.export` / `vault.export` /
+   `vault.read_raw`: by `COURIER` → `DENY` `COURIER_NO_RAW_SECRETS`; by any role
+   other than `CUSTODIAN` → `DENY` `SECRET_MATERIAL_CUSTODIAN_ONLY`.
+3. **Capability Registry** (`app/core/registry.py`) is the single source of
+   truth. Action absent → `DENY` `UNKNOWN_ACTION`. Action present but
+   `actor ∉ spec.allowed_roles` → `DENY` `ROLE_NOT_PERMITTED`.
+4. **Risk floor.** Effective risk = `max(declared, spec.min_risk,
+   prefix_safety_net(action))`. A caller cannot under-declare a sensitive
+   action.
+5. **Approval gate.** Effective L4 → `REQUIRE_APPROVAL` unless `owner_approved`
+   (`L4_OWNER_APPROVAL`). Effective L3 → `REQUIRE_APPROVAL` unless
+   `owner_approved` (`L3_APPROVAL`).
+6. Otherwise → `ALLOW` (`REGISTRY_ALLOW`).
 
-Any exception during evaluation → `DENY` (`EVALUATION_ERROR`). The API endpoint
-wraps the engine with the same fail-closed guard.
+Any exception during evaluation → `DENY` `EVALUATION_ERROR`. The API endpoint
+wraps the engine with the same fail-closed guard **and** only returns the
+decision if it was successfully written to the audit trail (see
+[AUDIT.md](AUDIT.md)).
 
-## Not yet implemented (V1+)
+## Custodian is not a universal executor
 
-- Persisted audit records for every decision (currently structured logs only).
-- Resource-scoped allow rules (resources are validated for shape, not matched).
+Custodian is a trusted secret / authorization boundary. It is **not** allowed to
+execute business or destructive actions (`production.delete`, `payment.execute`)
+just because it holds secrets. Those actions are assigned to an executor role
+(Engineer) in the registry and additionally require owner approval. A dedicated
+signed capability grant for such execution is a later sprint.
+
+## Not yet implemented
+
+- Resource-scoped authorization (ResourceId is validated for shape, not matched
+  against a per-resource ACL).
 - Signed / expiring capability grants issued from an `ALLOW` decision.
-- Caller authentication / authorization for the `/v1/policy/check` endpoint.
+- Real caller identity beyond the single Control Plane token (see
+  `app/api/deps.py`); OWNER / CUSTODIAN are not requestable via the API yet.
 
-The allowlist in `_allow_rules` is a seed vocabulary. It grows only through
-explicit, reviewed additions — never by widening a pattern.
+The registry grows only through explicit, reviewed additions — never by
+widening a pattern.

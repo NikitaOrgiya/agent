@@ -2,8 +2,12 @@ services:
   kernel:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
+    environment:
+      AGENTOS_ENV: ${AGENTOS_ENV:-dev}
+      AGENTOS_CONTROL_TOKEN: ${AGENTOS_CONTROL_TOKEN:?set AGENTOS_CONTROL_TOKEN in .env}
+      DATABASE_URL: postgresql+asyncpg://agentos:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agentos
+      REDIS_URL: redis://redis:6379/0
+    # Loopback only. Never publish the API on a routable interface here.
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -11,10 +15,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 3s
+      retries: 10
 
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Not published to the host: only reachable on the internal compose network.
     environment:
       POSTGRES_DB: agentos
       POSTGRES_USER: agentos
@@ -30,6 +40,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Not published to the host.
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - agentos_redis:/data
